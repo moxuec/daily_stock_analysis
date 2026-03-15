@@ -27,6 +27,8 @@ import threading
 from datetime import datetime
 from typing import Optional, Callable
 import time
+import concurrent.futures
+from collections import deque
 
 logger = logging.getLogger(__name__)
 
@@ -275,6 +277,8 @@ class FeishuStreamHandler:
         self._on_message = on_message
         self._reply_client = reply_client
         self._logger = logger
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=10, thread_name_prefix="feishu_worker")
+        self._processed_msg_ids = deque(maxlen=1000)
 
     @staticmethod
     def _truncate_log_content(text: str, max_len: int = 200) -> str:
@@ -312,8 +316,25 @@ class FeishuStreamHandler:
             if bot_message is None:
                 return
 
+            # 消息去重
+            if bot_message.message_id in self._processed_msg_ids:
+                self._logger.debug(f"[Feishu Stream] 忽略重复消息: {bot_message.message_id}")
+                return
+            
+            self._processed_msg_ids.append(bot_message.message_id)
+
             self._log_incoming_message(bot_message)
 
+            # 异步处理消息避免阻塞长连接导致飞书重试
+            self._executor.submit(self._process_message_async, bot_message)
+
+        except Exception as e:
+            self._logger.error(f"[Feishu Stream] 处理消息失败: {e}")
+            self._logger.exception(e)
+
+    def _process_message_async(self, bot_message: BotMessage) -> None:
+        """异步处理消息并发送回复"""
+        try:
             # 调用消息处理回调
             response = self._on_message(bot_message)
 
@@ -325,9 +346,8 @@ class FeishuStreamHandler:
                     at_user=response.at_user,
                     user_id=bot_message.user_id if response.at_user else None
                 )
-
         except Exception as e:
-            self._logger.error(f"[Feishu Stream] 处理消息失败: {e}")
+            self._logger.error(f"[Feishu Stream] 异步处理消息任务失败: {e}")
             self._logger.exception(e)
 
     def _parse_event_message(self, event: 'P2ImMessageReceiveV1') -> Optional[BotMessage]:
