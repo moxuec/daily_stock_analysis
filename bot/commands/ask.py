@@ -129,6 +129,40 @@ class AskCommand(BotCommand):
 
         logger.info(f"[AskCommand] Stock: {code}, Strategy: {strategy_id}, Extra: {strategy_text}")
 
+        import threading
+
+        # Prepend strategy tag
+        strategy_name = strategy_id
+        try:
+            from src.agent.factory import get_skill_manager
+            sm2 = get_skill_manager()
+            for s in sm2.list_skills():
+                if s.name == strategy_id:
+                    strategy_name = s.display_name
+                    break
+        except Exception:
+            pass
+
+        session_id = f"ask_{code}_{uuid.uuid4()}"
+
+        # 后台执行分析
+        thread = threading.Thread(
+            target=self._run_ask_async,
+            args=(message, config, code, strategy_id, strategy_text, session_id, strategy_name),
+            daemon=True
+        )
+        thread.start()
+
+        return BotResponse.markdown_response(
+            f"✅ **分析任务已提交**\n\n"
+            f"• 股票代码: `{code}`\n"
+            f"• 策略名称: {strategy_name}\n"
+            f"• 任务 ID: `{session_id[:20]}...`\n\n"
+            f"分析完成后将自动推送结果。"
+        )
+
+    def _run_ask_async(self, message: BotMessage, config, code: str, strategy_id: str, strategy_text: str, session_id: str, strategy_name: str) -> None:
+        """在后台线程执行 Agent 分析"""
         try:
             from src.agent.factory import build_agent_executor
             executor = build_agent_executor(config, skills=[strategy_id] if strategy_id else None)
@@ -138,31 +172,27 @@ class AskCommand(BotCommand):
             if strategy_text:
                 user_msg = f"请分析股票 {code}，{strategy_text}"
 
-            # Each /ask invocation is a self-contained single-shot analysis; isolate
-            # sessions per request so that different stocks or retry attempts never
-            # bleed context into each other.
-            session_id = f"ask_{code}_{uuid.uuid4()}"
             result = executor.chat(message=user_msg, session_id=session_id)
 
             if result.success:
-                # Prepend strategy tag
-                strategy_name = strategy_id
-                try:
-                    from src.agent.factory import get_skill_manager
-                    sm2 = get_skill_manager()
-                    for s in sm2.list_skills():
-                        if s.name == strategy_id:
-                            strategy_name = s.display_name
-                            break
-                except Exception:
-                    pass
-
                 header = f"📊 {code} | 策略: {strategy_name}\n{'─' * 30}\n"
-                return BotResponse.text_response(header + result.content)
+                response_text = header + result.content
             else:
-                return BotResponse.text_response(f"⚠️ 分析失败: {result.error}")
+                response_text = f"⚠️ 股票 {code} ({strategy_name}) 的分析任务执行失败: {result.error}"
+
+            # 通过通知服务发送回原上下文
+            from src.notification import NotificationService
+            notification_service = NotificationService(source_message=message)
+            notification_service.send_to_context(response_text)
+
+            logger.info(f"[AskCommand] 股票 {code} 策略 {strategy_id} 分析完成并已推送")
 
         except Exception as e:
-            logger.error(f"Ask command failed: {e}")
+            logger.error(f"Ask command run async failed: {e}")
             logger.exception("Ask error details:")
-            return BotResponse.text_response(f"⚠️ 问股执行出错: {str(e)}")
+            try:
+                from src.notification import NotificationService
+                notification_service = NotificationService(source_message=message)
+                notification_service.send_to_context(f"⚠️ 股票 {code} 问股执行出错: {str(e)[:100]}")
+            except Exception:
+                pass

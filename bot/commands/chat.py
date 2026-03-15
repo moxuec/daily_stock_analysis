@@ -52,17 +52,48 @@ class ChatCommand(BotCommand):
         user_message = " ".join(args)
         session_id = f"{message.platform}_{message.user_id}"
         
+        import uuid
+        import threading
+        task_id = f"chat_{uuid.uuid4()}"
+        
+        # 后台执行对话
+        thread = threading.Thread(
+            target=self._run_chat_async,
+            args=(message, config, user_message, session_id),
+            daemon=True
+        )
+        thread.start()
+        
+        return BotResponse.markdown_response(
+            f"✅ **对话任务已提交**\n\n"
+            f"• 任务 ID: `{task_id[:20]}...`\n\n"
+            f"AI 思考中，完成后将自动发送回复。"
+        )
+
+    def _run_chat_async(self, message: BotMessage, config, user_message: str, session_id: str) -> None:
+        """后台异步执行 Agent 聊天"""
         try:
             from src.agent.factory import build_agent_executor
             executor = build_agent_executor(config)
             result = executor.chat(message=user_message, session_id=session_id)
             
             if result.success:
-                return BotResponse.text_response(result.content)
+                response_text = result.content
             else:
-                return BotResponse.text_response(f"⚠️ 对话失败: {result.error}")
+                response_text = f"⚠️ 对话任务执行失败: {result.error}"
+
+            from src.notification import NotificationService
+            notification_service = NotificationService(source_message=message)
+            notification_service.send_to_context(response_text)
+            
+            logger.info(f"[ChatCommand] 后台对话完成并已推送")
                 
         except Exception as e:
-            logger.error(f"Chat command failed: {e}")
+            logger.error(f"Chat command run async failed: {e}")
             logger.exception("Chat error details:")
-            return BotResponse.text_response(f"⚠️ 对话执行出错: {str(e)}")
+            try:
+                from src.notification import NotificationService
+                notification_service = NotificationService(source_message=message)
+                notification_service.send_to_context(f"⚠️ 对话任务执行出错: {str(e)[:100]}")
+            except Exception:
+                pass
