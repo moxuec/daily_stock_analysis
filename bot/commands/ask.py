@@ -114,6 +114,18 @@ class AskCommand(BotCommand):
         # Default
         return "bull_trend"
 
+    def _get_strategy_name(self, strategy_id: str) -> str:
+        """从 strategy_id 获取 strategy_name"""
+        try:
+            from src.agent.factory import get_skill_manager
+            sm = get_skill_manager()
+            for s in sm.list_skills():
+                if s.name == strategy_id:
+                    return s.display_name
+        except Exception:
+            pass
+        return strategy_id
+
     def execute(self, message: BotMessage, args: List[str]) -> BotResponse:
         """Execute the ask command via Agent pipeline."""
         config = get_config()
@@ -132,16 +144,7 @@ class AskCommand(BotCommand):
         import threading
 
         # Prepend strategy tag
-        strategy_name = strategy_id
-        try:
-            from src.agent.factory import get_skill_manager
-            sm2 = get_skill_manager()
-            for s in sm2.list_skills():
-                if s.name == strategy_id:
-                    strategy_name = s.display_name
-                    break
-        except Exception:
-            pass
+        strategy_name = self._get_strategy_name(strategy_id)
 
         session_id = f"ask_{code}_{uuid.uuid4()}"
 

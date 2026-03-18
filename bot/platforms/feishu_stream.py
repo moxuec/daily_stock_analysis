@@ -279,6 +279,15 @@ class FeishuStreamHandler:
         self._logger = logger
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=10, thread_name_prefix="feishu_worker")
         self._processed_msg_ids = deque(maxlen=1000)
+        self._processed_msg_ids_lock = threading.Lock()
+
+    def shutdown(self) -> None:
+        """关闭线程池"""
+        try:
+            self._executor.shutdown(wait=False)
+            self._logger.info("[Feishu Stream] 线程池已关闭")
+        except Exception as e:
+            self._logger.error(f"[Feishu Stream] 关闭线程池异常: {e}")
 
     @staticmethod
     def _truncate_log_content(text: str, max_len: int = 200) -> str:
@@ -317,11 +326,12 @@ class FeishuStreamHandler:
                 return
 
             # 消息去重
-            if bot_message.message_id in self._processed_msg_ids:
-                self._logger.debug(f"[Feishu Stream] 忽略重复消息: {bot_message.message_id}")
-                return
-            
-            self._processed_msg_ids.append(bot_message.message_id)
+            with self._processed_msg_ids_lock:
+                if bot_message.message_id in self._processed_msg_ids:
+                    self._logger.debug(f"[Feishu Stream] 忽略重复消息: {bot_message.message_id}")
+                    return
+                
+                self._processed_msg_ids.append(bot_message.message_id)
 
             self._log_incoming_message(bot_message)
 
@@ -534,7 +544,7 @@ class FeishuStreamClient:
         self._reply_client = FeishuReplyClient(self._app_id, self._app_secret)
 
         # 创建消息处理器
-        handler = FeishuStreamHandler(
+        self._handler = FeishuStreamHandler(
             self._create_message_handler(),
             self._reply_client
         )
@@ -553,7 +563,7 @@ class FeishuStreamClient:
             verification_token=verification_token,
             level=lark.LogLevel.WARNING
         ).register_p2_im_message_receive_v1(
-            handler.handle_message
+            self._handler.handle_message
         ).build()
 
         return event_handler
@@ -619,6 +629,8 @@ class FeishuStreamClient:
     def stop(self) -> None:
         """停止客户端"""
         self._running = False
+        if hasattr(self, '_handler') and self._handler:
+            self._handler.shutdown()
         logger.info("[Feishu Stream] 客户端已停止")
 
     @property

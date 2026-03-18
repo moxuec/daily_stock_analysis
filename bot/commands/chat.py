@@ -8,8 +8,12 @@ import logging
 from bot.commands.base import BotCommand
 from bot.models import BotMessage, BotResponse
 from src.config import get_config
+import threading
 
 logger = logging.getLogger(__name__)
+
+_session_locks = {}
+_session_locks_lock = threading.Lock()
 
 class ChatCommand(BotCommand):
     """
@@ -73,9 +77,15 @@ class ChatCommand(BotCommand):
     def _run_chat_async(self, message: BotMessage, config, user_message: str, session_id: str) -> None:
         """后台异步执行 Agent 聊天"""
         try:
-            from src.agent.factory import build_agent_executor
-            executor = build_agent_executor(config)
-            result = executor.chat(message=user_message, session_id=session_id)
+            with _session_locks_lock:
+                if session_id not in _session_locks:
+                    _session_locks[session_id] = threading.Lock()
+                session_lock = _session_locks[session_id]
+                
+            with session_lock:
+                from src.agent.factory import build_agent_executor
+                executor = build_agent_executor(config)
+                result = executor.chat(message=user_message, session_id=session_id)
             
             if result.success:
                 response_text = result.content
