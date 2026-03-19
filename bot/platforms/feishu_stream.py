@@ -279,6 +279,7 @@ class FeishuStreamHandler:
         self._logger = logger
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=10, thread_name_prefix="feishu_worker")
         self._processed_msg_ids = deque(maxlen=1000)
+        self._processing_msg_ids = set()
         self._processed_msg_ids_lock = threading.Lock()
 
     def shutdown(self) -> None:
@@ -327,16 +328,21 @@ class FeishuStreamHandler:
 
             # 消息去重
             with self._processed_msg_ids_lock:
-                if bot_message.message_id in self._processed_msg_ids:
-                    self._logger.debug(f"[Feishu Stream] 忽略重复消息: {bot_message.message_id}")
+                if bot_message.message_id in self._processed_msg_ids or bot_message.message_id in self._processing_msg_ids:
+                    self._logger.debug(f"[Feishu Stream] 忽略重复或正在处理的消息: {bot_message.message_id}")
                     return
                 
-                self._processed_msg_ids.append(bot_message.message_id)
+                self._processing_msg_ids.add(bot_message.message_id)
 
             self._log_incoming_message(bot_message)
 
             # 异步处理消息避免阻塞长连接导致飞书重试
-            self._executor.submit(self._process_message_async, bot_message)
+            try:
+                self._executor.submit(self._process_message_async, bot_message)
+            except Exception as e:
+                with self._processed_msg_ids_lock:
+                    self._processing_msg_ids.discard(bot_message.message_id)
+                raise e
 
         except Exception as e:
             self._logger.error(f"[Feishu Stream] 处理消息失败: {e}")
@@ -344,6 +350,7 @@ class FeishuStreamHandler:
 
     def _process_message_async(self, bot_message: BotMessage) -> None:
         """异步处理消息并发送回复"""
+        success = False
         try:
             # 调用消息处理回调
             response = self._on_message(bot_message)
@@ -356,9 +363,15 @@ class FeishuStreamHandler:
                     at_user=response.at_user,
                     user_id=bot_message.user_id if response.at_user else None
                 )
+            success = True
         except Exception as e:
             self._logger.error(f"[Feishu Stream] 异步处理消息任务失败: {e}")
             self._logger.exception(e)
+        finally:
+            with self._processed_msg_ids_lock:
+                self._processing_msg_ids.discard(bot_message.message_id)
+                if success:
+                    self._processed_msg_ids.append(bot_message.message_id)
 
     def _parse_event_message(self, event: 'P2ImMessageReceiveV1') -> Optional[BotMessage]:
         """

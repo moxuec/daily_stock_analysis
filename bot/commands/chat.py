@@ -79,24 +79,33 @@ class ChatCommand(BotCommand):
         try:
             with _session_locks_lock:
                 if session_id not in _session_locks:
-                    _session_locks[session_id] = threading.Lock()
-                session_lock = _session_locks[session_id]
+                    _session_locks[session_id] = [threading.Lock(), 0]
+                lock_info = _session_locks[session_id]
+                lock_info[1] += 1
+                session_lock = lock_info[0]
                 
-            with session_lock:
-                from src.agent.factory import build_agent_executor
-                executor = build_agent_executor(config)
-                result = executor.chat(message=user_message, session_id=session_id)
-            
-            if result.success:
-                response_text = result.content
-            else:
-                response_text = f"⚠️ 对话任务执行失败: {result.error}"
+            try:
+                with session_lock:
+                    from src.agent.factory import build_agent_executor
+                    executor = build_agent_executor(config)
+                    result = executor.chat(message=user_message, session_id=session_id)
+                
+                if result.success:
+                    response_text = result.content
+                else:
+                    response_text = f"⚠️ 对话任务执行失败: {result.error}"
 
-            from src.notification import NotificationService
-            notification_service = NotificationService(source_message=message)
-            notification_service.send_to_context(response_text)
-            
-            logger.info(f"[ChatCommand] 后台对话完成并已推送")
+                from src.notification import NotificationService
+                notification_service = NotificationService(source_message=message)
+                notification_service.send_to_context(response_text)
+                
+                logger.info(f"[ChatCommand] 后台对话完成并已推送")
+            finally:
+                with _session_locks_lock:
+                    if session_id in _session_locks:
+                        _session_locks[session_id][1] -= 1
+                        if _session_locks[session_id][1] <= 0:
+                            del _session_locks[session_id]
                 
         except Exception as e:
             logger.error(f"Chat command run async failed: {e}")
